@@ -807,10 +807,11 @@ InitUSBKeyboard (
   IN OUT USB_KB_DEV   *UsbKeyboardDevice
   )
 {
-  UINT16              ConfigValue;
-  UINT8               Protocol;
-  EFI_STATUS          Status;
-  UINT32              TransferResult;
+  UINT16                       ConfigValue;
+  UINT8                        Protocol;
+  EFI_STATUS                   Status;
+  UINT32                       TransferResult;
+  EFI_USB_DEVICE_DESCRIPTOR    DevDesc;
 
   REPORT_STATUS_CODE_WITH_DEVICE_PATH (
     EFI_PROGRESS_CODE,
@@ -826,11 +827,26 @@ InitUSBKeyboard (
   // Use the config out of the descriptor
   // Assumed the first config is the correct one and this is not always the case
   //
-  Status = UsbGetConfiguration (
-             UsbKeyboardDevice->UsbIo,
-             &ConfigValue,
-             &TransferResult
-             );
+
+  Status = UsbKeyboardDevice->UsbIo->UsbGetDeviceDescriptor (
+              UsbKeyboardDevice->UsbIo,
+              &DevDesc);
+  if (EFI_ERROR (Status)) {
+    return EFI_DEVICE_ERROR;
+  }
+
+  if (DevDesc.IdVendor == 0x0557 && DevDesc.IdProduct == 0x2419) {
+    // Aspeed BMC HID keyboard doesn't respond to GetConfiguration
+    // which is a violation of the USB spec ...
+    Status = EFI_DEVICE_ERROR;
+  } else {
+    Status = UsbGetConfiguration (
+               UsbKeyboardDevice->UsbIo,
+               &ConfigValue,
+               &TransferResult
+               );
+  }
+
   if (EFI_ERROR (Status)) {
     ConfigValue = 0x01;
     //
@@ -857,11 +873,18 @@ InitUSBKeyboard (
     }
   }
 
-  UsbGetProtocolRequest (
-    UsbKeyboardDevice->UsbIo,
-    UsbKeyboardDevice->InterfaceDescriptor.InterfaceNumber,
-    &Protocol
-    );
+  if (DevDesc.IdVendor == 0x0557 && DevDesc.IdProduct == 0x2419) {
+    // Aspeed BMC HID keyboard doesn't respond to GetProtocolRequest
+    // which is a violation of the USB HID spec ...
+   Protocol = ~0;
+  } else {
+    UsbGetProtocolRequest (
+      UsbKeyboardDevice->UsbIo,
+      UsbKeyboardDevice->InterfaceDescriptor.InterfaceNumber,
+      &Protocol
+      );
+  }
+
   //
   // Set boot protocol for the USB Keyboard.
   // This driver only supports boot protocol.
@@ -895,6 +918,14 @@ InitUSBKeyboard (
   UsbKeyboardDevice->AltGrOn      = FALSE;
 
   UsbKeyboardDevice->CurrentNsKey = NULL;
+
+  if (DevDesc.IdVendor == 0x0557 && DevDesc.IdProduct == 0x2419) {
+    // Aspeed HID doesn't send interrupt transfers until SetIdle was called
+    UsbSetIdleRequest(UsbKeyboardDevice->UsbIo,
+      UsbKeyboardDevice->InterfaceDescriptor.InterfaceNumber,
+      0,
+      0);
+  }
 
   //
   // Sync the initial state of lights on keyboard.
