@@ -37,6 +37,8 @@ ParseAcpiInfo (
   UINT32                                                                                 *Signature;
   EFI_ACPI_MEMORY_MAPPED_CONFIGURATION_BASE_ADDRESS_TABLE_HEADER                         *MmCfgHdr;
   EFI_ACPI_MEMORY_MAPPED_ENHANCED_CONFIGURATION_SPACE_BASE_ADDRESS_ALLOCATION_STRUCTURE  *MmCfgBase;
+  BOOLEAN                                                                                TPM2TablePresent;
+  BOOLEAN                                                                                TCPATablePresent;
 
   Rsdp = (EFI_ACPI_3_0_ROOT_SYSTEM_DESCRIPTION_POINTER *)(UINTN)AcpiTableBase;
   DEBUG ((DEBUG_INFO, "Rsdp at 0x%p\n", Rsdp));
@@ -45,9 +47,11 @@ ParseAcpiInfo (
   //
   // Search Rsdt First
   //
-  Fadt     = NULL;
-  MmCfgHdr = NULL;
-  Rsdt     = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)(Rsdp->RsdtAddress);
+  Fadt             = NULL;
+  MmCfgHdr         = NULL;
+  TPM2TablePresent = FALSE;
+  TCPATablePresent = FALSE;
+  Rsdt             = (EFI_ACPI_DESCRIPTION_HEADER *)(UINTN)(Rsdp->RsdtAddress);
   if (Rsdt != NULL) {
     Entry32    = (UINT32 *)(Rsdt + 1);
     Entry32Num = (Rsdt->Length - sizeof (EFI_ACPI_DESCRIPTION_HEADER)) >> 2;
@@ -63,8 +67,12 @@ ParseAcpiInfo (
         DEBUG ((DEBUG_INFO, "Found MM config address in Rsdt\n"));
       }
 
-      if ((Fadt != NULL) && (MmCfgHdr != NULL)) {
-        goto Done;
+      if (*Signature == EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_2_TABLE_SIGNATURE) {
+        TPM2TablePresent = TRUE;
+      }
+
+      if (*Signature == EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_ALLIANCE_CAPABILITIES_TABLE_SIGNATURE) {
+        TCPATablePresent = TRUE;
       }
     }
   }
@@ -88,8 +96,12 @@ ParseAcpiInfo (
         DEBUG ((DEBUG_INFO, "Found MM config address in Xsdt\n"));
       }
 
-      if ((Fadt != NULL) && (MmCfgHdr != NULL)) {
-        goto Done;
+      if (*Signature == EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_2_TABLE_SIGNATURE) {
+        TPM2TablePresent = TRUE;
+      }
+
+      if (*Signature == EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_ALLIANCE_CAPABILITIES_TABLE_SIGNATURE) {
+        TCPATablePresent = TRUE;
       }
     }
   }
@@ -98,7 +110,8 @@ ParseAcpiInfo (
     return RETURN_NOT_FOUND;
   }
 
-Done:
+  AcpiBoardInfo->TPM20Present = TPM2TablePresent;
+  AcpiBoardInfo->TPM12Present = TCPATablePresent;
 
   AcpiBoardInfo->PmCtrlRegBase   = Fadt->Pm1aCntBlk;
   AcpiBoardInfo->PmTimerRegBase  = Fadt->PmTmrBlk;
@@ -116,14 +129,16 @@ Done:
     AcpiBoardInfo->PcieBaseSize    = 0;
   }
 
-  DEBUG ((DEBUG_INFO, "PmCtrl  Reg 0x%lx\n", AcpiBoardInfo->PmCtrlRegBase));
-  DEBUG ((DEBUG_INFO, "PmTimer Reg 0x%lx\n", AcpiBoardInfo->PmTimerRegBase));
-  DEBUG ((DEBUG_INFO, "Reset   Reg 0x%lx\n", AcpiBoardInfo->ResetRegAddress));
-  DEBUG ((DEBUG_INFO, "Reset   Value 0x%x\n", AcpiBoardInfo->ResetValue));
-  DEBUG ((DEBUG_INFO, "PmEvt   Reg 0x%lx\n", AcpiBoardInfo->PmEvtBase));
-  DEBUG ((DEBUG_INFO, "PmGpeEn Reg 0x%lx\n", AcpiBoardInfo->PmGpeEnBase));
-  DEBUG ((DEBUG_INFO, "PcieBaseAddr 0x%lx\n", AcpiBoardInfo->PcieBaseAddress));
-  DEBUG ((DEBUG_INFO, "PcieBaseSize 0x%lx\n", AcpiBoardInfo->PcieBaseSize));
+  DEBUG ((DEBUG_INFO, "PmCtrl  Reg     0x%lx\n", AcpiBoardInfo->PmCtrlRegBase));
+  DEBUG ((DEBUG_INFO, "PmTimer Reg     0x%lx\n", AcpiBoardInfo->PmTimerRegBase));
+  DEBUG ((DEBUG_INFO, "Reset   Reg     0x%lx\n", AcpiBoardInfo->ResetRegAddress));
+  DEBUG ((DEBUG_INFO, "Reset   Value   0x%x\n", AcpiBoardInfo->ResetValue));
+  DEBUG ((DEBUG_INFO, "PmEvt   Reg     0x%lx\n", AcpiBoardInfo->PmEvtBase));
+  DEBUG ((DEBUG_INFO, "PmGpeEn Reg     0x%lx\n", AcpiBoardInfo->PmGpeEnBase));
+  DEBUG ((DEBUG_INFO, "PcieBaseAddr    0x%lx\n", AcpiBoardInfo->PcieBaseAddress));
+  DEBUG ((DEBUG_INFO, "PcieBaseSize    0x%lx\n", AcpiBoardInfo->PcieBaseSize));
+  DEBUG ((DEBUG_INFO, "TPM 2.0 present %x\n", AcpiBoardInfo->TPM20Present));
+  DEBUG ((DEBUG_INFO, "TPM 1.2 present %x\n", AcpiBoardInfo->TPM12Present));
 
   return RETURN_SUCCESS;
 }
