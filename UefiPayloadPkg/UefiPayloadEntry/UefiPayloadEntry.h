@@ -25,6 +25,8 @@
 #include <Library/PlatformSupportLib.h>
 #include <Library/CpuLib.h>
 #include <IndustryStandard/Acpi.h>
+#include <IndustryStandard/Tpm2Acpi.h>
+#include <IndustryStandard/Tpm20.h>
 #include <IndustryStandard/MemoryMappedConfigurationSpaceAccessTable.h>
 #include <Guid/SerialPortInfoGuid.h>
 #include <Guid/MemoryMapInfoGuid.h>

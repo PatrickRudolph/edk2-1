@@ -9,6 +9,110 @@
 
 #include "UefiPayloadEntry.h"
 
+#pragma pack(1)
+
+typedef struct {
+  EFI_ACPI_DESCRIPTION_HEADER    Header;
+  // Flags field is replaced in version 4 and above
+  //    BIT0~15:  PlatformClass      This field is only valid for version 4 and above
+  //    BIT16~31: Reserved
+  UINT32                         Flags;
+  UINT64                         AddressOfControlArea;
+  UINT32                         StartMethod;
+} EFI_TPM2_ACPI_TABLE_V4;
+
+#pragma pack()
+
+/**
+  Parse the TPM2 ACPI table to get the AMD fTPM information.
+
+  @param[in]  Tpm2AcpiTable      Pointer to the TPM2 ACPI table.
+  @param[out] AcpiBoardInfo      Pointer to the ACPI board info structure.
+*/
+STATIC
+VOID
+ParseTPM2AcpiInfo (
+  IN   EFI_TPM2_ACPI_TABLE_V4 *Tpm2AcpiTable,
+  OUT  ACPI_BOARD_INFO        *AcpiBoardInfo
+  )
+{
+  UINT32                     CommandSize;
+  UINT64                     CommandAddress;
+  UINT32                     ResponseSize;
+  UINT64                     ResponseAddress;
+  UINTN                      Address;
+  UINT32                     AddressLow;
+  UINT32                     AddressHigh;
+  EFI_TPM2_ACPI_CONTROL_AREA *ControlArea;
+
+  if (Tpm2AcpiTable == NULL || AcpiBoardInfo == NULL) {
+    return;
+  }
+
+  if (Tpm2AcpiTable->Header.Signature != EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_2_TABLE_SIGNATURE) {
+    return;
+  }
+  if (Tpm2AcpiTable->Header.Length < sizeof (EFI_TPM2_ACPI_TABLE_V4)) {
+    return;
+  }
+
+  AcpiBoardInfo->TPM20Present = 1;
+
+  //
+  // AMD fTPM is only supported on AMD platforms, so check the signature first
+  //
+  if (!StandardSignatureIsAuthenticAMD ()) {
+    return;
+  }
+
+  //
+  // Check that the control area address is valid.
+  // Usually points to PSP MMIO space.
+  //
+  if (Tpm2AcpiTable->AddressOfControlArea == 0 ||
+      Tpm2AcpiTable->AddressOfControlArea == MAX_UINT64 ||
+      Tpm2AcpiTable->AddressOfControlArea == 0xfed40000) {
+    return;
+  }
+
+  //
+  // AMD fTPM only supports the ACPI start method, so check that here.
+  //
+  if (Tpm2AcpiTable->StartMethod != EFI_TPM2_ACPI_TABLE_START_METHOD_ACPI) {
+    return;
+  }
+  ControlArea = (EFI_TPM2_ACPI_CONTROL_AREA *)(UINTN)Tpm2AcpiTable->AddressOfControlArea;
+
+  //
+  // Ensure MMIO space is accessible and valid by reading the command and
+  // response addresses and sizes. No TPM communication is done here, just probing
+  // the MMIO space to ensure it is valid.
+  //
+  CommandSize = MmioRead32 ((UINTN)&ControlArea->CommandSize);
+  Address      = (UINTN)&ControlArea->Command;
+  AddressLow   = MmioRead32 (Address);
+  AddressHigh  = MmioRead32 (Address + sizeof (UINT32));
+  CommandAddress = LShiftU64 (AddressHigh, 32) | AddressLow;
+
+  ResponseSize = MmioRead32 ((UINTN)&ControlArea->ResponseSize);
+  Address       = (UINTN)&ControlArea->Response;
+  AddressLow    = MmioRead32 (Address);
+  AddressHigh   = MmioRead32 (Address + sizeof (UINT32));
+  ResponseAddress = LShiftU64 (AddressHigh, 32) | AddressLow;
+
+  if ((CommandSize == 0) || CommandSize == MAX_UINT32 ||
+      (ResponseSize == MAX_UINT32) || (ResponseSize < sizeof (TPM2_RESPONSE_HEADER)) ||
+      (CommandAddress == 0) || (ResponseAddress == 0) ||
+      (CommandAddress == MAX_UINT64) || (ResponseAddress == MAX_UINT64))
+  {
+    return;
+  }
+
+  AcpiBoardInfo->TPM20Present = 0;
+  AcpiBoardInfo->AMDfTPMPresent = 1;
+  AcpiBoardInfo->Tpm2AddressOfControlArea = Tpm2AcpiTable->AddressOfControlArea;
+}
+
 /**
   Find the board related info from ACPI table
 
@@ -37,15 +141,15 @@ ParseAcpiInfo (
   UINT32                                                                                 *Signature;
   EFI_ACPI_MEMORY_MAPPED_CONFIGURATION_BASE_ADDRESS_TABLE_HEADER                         *MmCfgHdr;
   EFI_ACPI_MEMORY_MAPPED_ENHANCED_CONFIGURATION_SPACE_BASE_ADDRESS_ALLOCATION_STRUCTURE  *MmCfgBase;
-  UINTN                                                                                  TPM2TablePresent;
+  EFI_TPM2_ACPI_TABLE_V4                                                                 *Tpm2AcpiTable;
   UINTN                                                                                  TCPATablePresent;
 
   Rsdp = (EFI_ACPI_3_0_ROOT_SYSTEM_DESCRIPTION_POINTER *)(UINTN)AcpiTableBase;
   DEBUG ((DEBUG_INFO, "Rsdp at 0x%p\n", Rsdp));
   DEBUG ((DEBUG_INFO, "Rsdt at 0x%x, Xsdt at 0x%lx\n", Rsdp->RsdtAddress, Rsdp->XsdtAddress));
 
-  TPM2TablePresent = 0;
   TCPATablePresent = 0;
+  Tpm2AcpiTable = NULL;
 
   //
   // Search Rsdt First
@@ -69,14 +173,14 @@ ParseAcpiInfo (
       }
 
       if (*Signature == EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_2_TABLE_SIGNATURE) {
-        TPM2TablePresent = 1;
+        Tpm2AcpiTable = (EFI_TPM2_ACPI_TABLE_V4 *)(UINTN)Entry32[Idx];
       }
 
       if (*Signature == EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_ALLIANCE_CAPABILITIES_TABLE_SIGNATURE) {
         TCPATablePresent = 1;
       }
 
-     if ((Fadt != NULL) && (MmCfgHdr != NULL) && (TPM2TablePresent || TCPATablePresent ))   {
+     if ((Fadt != NULL) && (MmCfgHdr != NULL) && ((Tpm2AcpiTable != NULL) || TCPATablePresent)) {
         goto TpmDectectDone;
       }
     }
@@ -102,14 +206,14 @@ ParseAcpiInfo (
       }
 
       if (*Signature == EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_2_TABLE_SIGNATURE) {
-        TPM2TablePresent = 1;
+        Tpm2AcpiTable = (EFI_TPM2_ACPI_TABLE_V4 *)(UINTN)Entry32[Idx];
       }
 
       if (*Signature == EFI_ACPI_5_0_TRUSTED_COMPUTING_PLATFORM_ALLIANCE_CAPABILITIES_TABLE_SIGNATURE) {
         TCPATablePresent = 1;
       }
 
-      if ((Fadt != NULL) && (MmCfgHdr != NULL) && (TPM2TablePresent || TCPATablePresent)) {
+      if ((Fadt != NULL) && (MmCfgHdr != NULL) && ((Tpm2AcpiTable != NULL) || TCPATablePresent)) {
         goto TpmDectectDone;
       }
     }
@@ -120,8 +224,10 @@ ParseAcpiInfo (
   }
 
 TpmDectectDone:
+  if (Tpm2AcpiTable != NULL) {
+    ParseTPM2AcpiInfo(Tpm2AcpiTable, AcpiBoardInfo);
+  }
 
-  AcpiBoardInfo->TPM20Present = TPM2TablePresent;
   AcpiBoardInfo->TPM12Present = TCPATablePresent;
 
   AcpiBoardInfo->PmCtrlRegBase   = Fadt->Pm1aCntBlk;
@@ -149,6 +255,7 @@ TpmDectectDone:
   DEBUG ((DEBUG_INFO, "PcieBaseAddr 0x%lx\n", AcpiBoardInfo->PcieBaseAddress));
   DEBUG ((DEBUG_INFO, "PcieBaseSize 0x%lx\n", AcpiBoardInfo->PcieBaseSize));
   DEBUG ((DEBUG_INFO, "TPM 2.0 present %x\n", AcpiBoardInfo->TPM20Present));
+  DEBUG ((DEBUG_INFO, "AMDfTPM present %x\n", AcpiBoardInfo->AMDfTPMPresent));
   DEBUG ((DEBUG_INFO, "TPM 1.2 present %x\n", AcpiBoardInfo->TPM12Present));
 
   return RETURN_SUCCESS;

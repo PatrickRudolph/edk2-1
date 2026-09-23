@@ -72,6 +72,18 @@ BlDxeEntryPoint (
                );
       ASSERT_EFI_ERROR (Status);
     }
+    else if (AcpiBoardInfo->AMDfTPMPresent)
+    {
+      Size = sizeof (gEfiTpmDeviceInstanceTpm20AMDfTPMGuid);
+      Status = PcdSetPtrS (
+                 PcdTpmInstanceGuid,
+                 &Size,
+                 &gEfiTpmDeviceInstanceTpm20AMDfTPMGuid
+                 );
+      ASSERT_EFI_ERROR (Status);
+      Status = (EFI_STATUS)PcdSet64S (PcdTpmBaseAddress, AcpiBoardInfo->Tpm2AddressOfControlArea);
+      ASSERT_EFI_ERROR (Status);
+    }
     else if (AcpiBoardInfo->TPM20Present)
     {
       Size = sizeof (gEfiTpmDeviceInstanceTpm20DtpmGuid);

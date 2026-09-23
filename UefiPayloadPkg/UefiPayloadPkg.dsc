@@ -1057,6 +1057,7 @@
   gEfiMdeModulePkgTokenSpaceGuid.PcdPciDisableBusEnumeration|TRUE
 
   ## Patched by BlSupportDxe
+  gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress|0xFED40000
   gEfiSecurityPkgTokenSpaceGuid.PcdTpmInstanceGuid|{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
   gEfiSecurityPkgTokenSpaceGuid.PcdTpmInitializationPolicy|0
   ## Match the hash algorithms listed in Tcg2Dxe
