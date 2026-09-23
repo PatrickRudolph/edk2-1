@@ -17,9 +17,13 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #define TPM_DEVICE_INTERFACE_TPM20_DTPM  \
   { 0x286bf25a, 0xc2c3, 0x408c, { 0xb3, 0xb4, 0x25, 0xe6, 0x75, 0x8b, 0x73, 0x17 } }
 
+#define TPM_DEVICE_INTERFACE_TPM20_AMD_FTPM  \
+  { 0x254ae2ac, 0x57c7, 0x42d2, { 0x94, 0x00, 0x17, 0xcb, 0xed, 0xf6, 0xda, 0x04 } }
+
 extern EFI_GUID  gEfiTpmDeviceInstanceNoneGuid;
 extern EFI_GUID  gEfiTpmDeviceInstanceTpm12Guid;
 extern EFI_GUID  gEfiTpmDeviceInstanceTpm20DtpmGuid;
+extern EFI_GUID  gEfiTpmDeviceInstanceTpm20AMDfTPMGuid;
 
 #define TPM_DEVICE_SELECTED_GUID  \
   { 0x7f4158d3, 0x74d, 0x456d, { 0x8c, 0xb2, 0x1, 0xf9, 0xc8, 0xf7, 0x9d, 0xaa } }

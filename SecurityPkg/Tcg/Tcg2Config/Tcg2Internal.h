@@ -15,6 +15,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
   {TPM_DEVICE_INTERFACE_NONE,           TPM_DEVICE_NULL},      \
   {TPM_DEVICE_INTERFACE_TPM12,          TPM_DEVICE_1_2},       \
   {TPM_DEVICE_INTERFACE_TPM20_DTPM,     TPM_DEVICE_2_0_DTPM},  \
+  {TPM_DEVICE_INTERFACE_TPM20_AMD_FTPM, TPM_DEVICE_2_0_AMD_FTPM},  \
 }
 
 typedef struct {
