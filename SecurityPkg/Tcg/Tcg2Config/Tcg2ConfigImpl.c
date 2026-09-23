@@ -892,6 +892,9 @@ InstallTcg2ConfigForm (
     case TPM_DEVICE_2_0_DTPM:
       HiiSetString (PrivateData->HiiHandle, STRING_TOKEN (STR_TCG2_DEVICE_STATE_CONTENT), L"TPM 2.0", NULL);
       break;
+    case TPM_DEVICE_2_0_AMD_FTPM:
+      HiiSetString (PrivateData->HiiHandle, STRING_TOKEN (STR_TCG2_DEVICE_STATE_CONTENT), L"AMD fTPM 2.0", NULL);
+      break;
     default:
       HiiSetString (PrivateData->HiiHandle, STRING_TOKEN (STR_TCG2_DEVICE_STATE_CONTENT), L"Unknown", NULL);
       break;
@@ -1005,6 +1008,9 @@ InstallTcg2ConfigForm (
         HiiSetString (PrivateData->HiiHandle, STRING_TOKEN (STR_TCG2_DEVICE_INTERFACE_CAPABILITY_CONTENT), L"Unknown", NULL);
         break;
     }
+  } else if (PrivateData->TpmDeviceDetected == TPM_DEVICE_2_0_AMD_FTPM) {
+    HiiSetString (PrivateData->HiiHandle, STRING_TOKEN (STR_TCG2_DEVICE_INTERFACE_STATE_CONTENT), L"AMD vendor specific", NULL);
+    HiiSetString (PrivateData->HiiHandle, STRING_TOKEN (STR_TCG2_DEVICE_INTERFACE_CAPABILITY_CONTENT), L"AMD vendor specific", NULL);
   }
 
   //

@@ -29,12 +29,13 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #define KEY_TCG2_PPI_VERSION          0x2009
 #define KEY_TPM2_ACPI_REVISION        0x200A
 
-#define TPM_DEVICE_NULL      0
-#define TPM_DEVICE_1_2       1
-#define TPM_DEVICE_2_0_DTPM  2
-#define TPM_DEVICE_MIN       TPM_DEVICE_1_2
-#define TPM_DEVICE_MAX       TPM_DEVICE_2_0_DTPM
-#define TPM_DEVICE_DEFAULT   TPM_DEVICE_1_2
+#define TPM_DEVICE_NULL          0
+#define TPM_DEVICE_1_2           1
+#define TPM_DEVICE_2_0_DTPM      2
+#define TPM_DEVICE_2_0_AMD_FTPM  3
+#define TPM_DEVICE_MIN           TPM_DEVICE_1_2
+#define TPM_DEVICE_MAX           TPM_DEVICE_2_0_AMD_FTPM
+#define TPM_DEVICE_DEFAULT       TPM_DEVICE_1_2
 
 #define TPM2_ACPI_REVISION_3  3
 #define TPM2_ACPI_REVISION_4  4
