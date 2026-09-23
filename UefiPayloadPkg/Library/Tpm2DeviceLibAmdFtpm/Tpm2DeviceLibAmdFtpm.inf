@@ -1,0 +1,35 @@
+## @file
+#  TPM2 device library for the AMD fTPM CRB interface exposed by coreboot.
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = Tpm2DeviceLibAmdFtpm
+  FILE_GUID                      = 9D5C8C75-AD71-43C6-A947-D8405F35A537
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  LIBRARY_CLASS                  = Tpm2DeviceLib|DXE_DRIVER
+
+[Sources]
+  Tpm2DeviceLibAmdFtpm.c
+  Tpm2AMDCRB.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  SecurityPkg/SecurityPkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  IoLib
+  TimerLib
+
+[Pcd]
+  gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress               ## CONSUMES
+
+[Guids]
+  gUniversalPayloadAcpiTableGuid
