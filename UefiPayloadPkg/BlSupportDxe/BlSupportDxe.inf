@@ -58,6 +58,7 @@
   gEfiSystemResourceTableGuid
   gEfiTpmDeviceInstanceTpm20DtpmGuid  ## SOMETIMES_CONSUMES
   gEfiTpmDeviceInstanceTpm12Guid      ## SOMETIMES_CONSUMES
+  gEfiTpmDeviceInstanceTpm20AMDfTPMGuid ## SOMETIMES_CONSUMES
 
 [Protocols]
   gEfiCpuArchProtocolGuid
@@ -70,6 +71,7 @@
   gEfiMdePkgTokenSpaceGuid.PcdPciExpressBaseAddress
   gEfiMdePkgTokenSpaceGuid.PcdPciExpressBaseSize
   gEfiSecurityPkgTokenSpaceGuid.PcdTpmInstanceGuid        ## SOMETIMES_PRODUCES
+  gEfiSecurityPkgTokenSpaceGuid.PcdTpmBaseAddress         ## SOMETIMES_PRODUCES
 
 [Pcd.AARCH64]
   gEfiMdeModulePkgTokenSpaceGuid.PcdSerialRegisterBase
