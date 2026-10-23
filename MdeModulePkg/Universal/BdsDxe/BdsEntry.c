@@ -409,9 +409,10 @@ BootBootOptions (
 
     //
     // All the driver options should have been processed since
-    // now boot will be performed.
+    // now boot will be performed. A failed automatic attempt falls
+    // through to the next BootOrder entry without a key prompt.
     //
-    EfiBootManagerBoot (&BootOptions[Index]);
+    EfiBootManagerBootEx (&BootOptions[Index], FALSE);
 
     //
     // If infinite retries is enabled, do not break out of the loop.

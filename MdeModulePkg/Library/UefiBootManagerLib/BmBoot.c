@@ -1929,19 +1929,23 @@ BmReportLoadFailure (
   is attempted (\EFI\BOOTIA32.EFI, \EFI\BOOTX64.EFI,... only one file type
   is tried per processor type)
 
-  @param  BootOption    Boot Option to try and boot.
-                        On return, BootOption->Status contains the boot status.
-                        EFI_SUCCESS     BootOption was booted
-                        EFI_UNSUPPORTED A BBS device path was found with no valid callback
-                                        registered via EfiBootManagerInitialize().
-                        EFI_NOT_FOUND   The BootOption was not found on the system
-                        !EFI_SUCCESS    BootOption failed with this error status
+  @param  BootOption        Boot Option to try and boot.
+                            On return, BootOption->Status contains the boot status.
+                            EFI_SUCCESS     BootOption was booted
+                            EFI_UNSUPPORTED A BBS device path was found with no valid callback
+                                            registered via EfiBootManagerInitialize().
+                            EFI_NOT_FOUND   The BootOption was not found on the system
+                            !EFI_SUCCESS    BootOption failed with this error status
+  @param  PromptOnFailure   TRUE to display a load-failure message and wait for a
+                            key. FALSE to return immediately so the caller can try
+                            the next boot option.
 
 **/
 VOID
 EFIAPI
-EfiBootManagerBoot (
-  IN  EFI_BOOT_MANAGER_LOAD_OPTION  *BootOption
+EfiBootManagerBootEx (
+  IN  EFI_BOOT_MANAGER_LOAD_OPTION  *BootOption,
+  IN  BOOLEAN                       PromptOnFailure
   )
 {
   EFI_STATUS                 Status;
@@ -2100,37 +2104,44 @@ EfiBootManagerBoot (
       BmReportLoadFailure (EFI_SW_DXE_BS_EC_BOOT_OPTION_LOAD_ERROR, Status);
       BootOption->Status = Status;
 
-      if (gST->ConOut != NULL) {
-        //
-        // Clear screen
-        //
-        gST->ConOut->ClearScreen (gST->ConOut);
+      //
+      // Automatic BootOrder processing passes PromptOnFailure as FALSE and
+      // falls through to the next option. A menu, hotkey, or BootNext
+      // selection prompts so the user can see why that choice failed.
+      //
+      if (PromptOnFailure) {
+        if (gST->ConOut != NULL) {
+          //
+          // Clear screen
+          //
+          gST->ConOut->ClearScreen (gST->ConOut);
 
-        AsciiPrint (
-            "Booting from '%s' failed: %r\n"
-            "\nVerify it contains/points to a valid 64-bit UEFI OS.\n"
-            "\nPress any key to continue\n",
-            BootOption->Description, Status);
+          AsciiPrint (
+              "Booting from '%s' failed: %r\n"
+              "\nVerify it contains/points to a valid 64-bit UEFI OS.\n"
+              "\nPress any key to continue\n",
+              BootOption->Description, Status);
 
-        //
-        // When UEFI Secure Boot is enabled, unsigned modules won't load.
-        //
-        SecureBoot = NULL;
-        GetEfiGlobalVariable2 (EFI_SECURE_BOOT_MODE_NAME, (VOID**)&SecureBoot, NULL);
-        if ((SecureBoot != NULL) && (*SecureBoot == SECURE_BOOT_MODE_ENABLE)) {
-          AsciiPrint ("SecureBoot is enabled; ensure selected boot entry is compatible.\n\n");
-          FreePool (SecureBoot);
+          //
+          // When UEFI Secure Boot is enabled, unsigned modules won't load.
+          //
+          SecureBoot = NULL;
+          GetEfiGlobalVariable2 (EFI_SECURE_BOOT_MODE_NAME, (VOID**)&SecureBoot, NULL);
+          if ((SecureBoot != NULL) && (*SecureBoot == SECURE_BOOT_MODE_ENABLE)) {
+            AsciiPrint ("SecureBoot is enabled; ensure selected boot entry is compatible.\n\n");
+            FreePool (SecureBoot);
+          }
         }
-      }
-      if (gST->ConIn != NULL) {
-        Status = gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index);
-        ASSERT_EFI_ERROR (Status);
-        ASSERT (Index == 0);
-        while (!EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {}
-      }
+        if (gST->ConIn != NULL) {
+          Status = gBS->WaitForEvent (1, &gST->ConIn->WaitForKey, &Index);
+          ASSERT_EFI_ERROR (Status);
+          ASSERT (Index == 0);
+          while (!EFI_ERROR (gST->ConIn->ReadKeyStroke (gST->ConIn, &Key))) {}
+        }
 
-      if (gST->ConOut != NULL) {
-        gST->ConOut->ClearScreen (gST->ConOut);
+        if (gST->ConOut != NULL) {
+          gST->ConOut->ClearScreen (gST->ConOut);
+        }
       }
 
       return;
@@ -2253,6 +2264,24 @@ EfiBootManagerBoot (
   // exiting BootXXXX causes deleting BootCurrent returns EFI_NOT_FOUND.
   //
   ASSERT (Status == EFI_SUCCESS || Status == EFI_NOT_FOUND);
+}
+
+/**
+  Attempt to boot the EFI boot option and prompt if the load fails.
+
+  Equivalent to EfiBootManagerBootEx() with PromptOnFailure set to TRUE.
+
+  @param  BootOption    Boot Option to try and boot.
+                        On return, BootOption->Status contains the boot status.
+
+**/
+VOID
+EFIAPI
+EfiBootManagerBoot (
+  IN  EFI_BOOT_MANAGER_LOAD_OPTION  *BootOption
+  )
+{
+  EfiBootManagerBootEx (BootOption, TRUE);
 }
 
 /**

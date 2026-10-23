@@ -406,6 +406,32 @@ EfiBootManagerRefreshAllBootOption (
   fails the removable media boot algorithm is attempted (\EFI\BOOTIA32.EFI,
   \EFI\BOOTX64.EFI,... only one file type is tried per processor type)
 
+  @param  BootOption        Boot Option to try and boot.
+                            On return, BootOption->Status contains the boot status:
+                            EFI_SUCCESS     BootOption was booted
+                            EFI_UNSUPPORTED BootOption isn't supported.
+                            EFI_NOT_FOUND   The BootOption was not found on the system
+                            Others          BootOption failed with this error status
+  @param  PromptOnFailure   TRUE to display a load-failure message and wait for a
+                            key. FALSE to return immediately so the caller can try
+                            the next boot option. Status reporting is unchanged
+                            in either case.
+
+**/
+VOID
+EFIAPI
+EfiBootManagerBootEx (
+  IN  EFI_BOOT_MANAGER_LOAD_OPTION  *BootOption,
+  IN  BOOLEAN                       PromptOnFailure
+  );
+
+/**
+  Attempt to boot the EFI boot option and prompt if the load fails.
+
+  Equivalent to EfiBootManagerBootEx() with PromptOnFailure set to TRUE.
+  Use EfiBootManagerBootEx() with PromptOnFailure set to FALSE when walking
+  BootOrder automatically.
+
   @param  BootOption    Boot Option to try and boot.
                         On return, BootOption->Status contains the boot status:
                         EFI_SUCCESS     BootOption was booted
