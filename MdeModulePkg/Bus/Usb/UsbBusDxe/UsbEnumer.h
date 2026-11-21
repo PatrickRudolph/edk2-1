@@ -192,3 +192,85 @@ UsbRootHubEnumeration (
   IN EFI_EVENT  Event,
   IN VOID       *Context
   );
+
+typedef enum {
+  UsbPortResetSkip,       // The port is already reset
+  UsbPortResetFull,       // Reset the port synchronously
+  UsbPortResetRootFinish  // Complete a reset started with UsbRootHubResetPortStart ()
+} USB_PORT_RESET_MODE;
+
+/**
+  Enumerate and configure the new device on the port of this HUB interface
+  after the port connection has been stable for USB_WAIT_PORT_STABLE_STALL.
+
+  @param  HubIf                 The HUB that has the device connected.
+  @param  Port                  The port index of the hub (started with zero).
+  @param  ResetMode             How to reset the port.
+  @param  ResumeChild           The addressed device to configure, or NULL to
+                                start the enumeration.
+  @param  ResumeRetryCount      The retry count of ResumeChild.
+  @param  AllowYield            Whether the configuration of the device may be
+                                continued in a timer callback once it is
+                                addressed.
+
+  @retval EFI_SUCCESS           The device is enumerated (added or removed).
+  @retval EFI_NOT_READY         The device is addressed and will be configured
+                                in a timer callback.
+  @retval EFI_OUT_OF_RESOURCES  Failed to allocate resource for the device.
+  @retval Others                Failed to enumerate the device.
+
+**/
+EFI_STATUS
+UsbEnumerateStableDev (
+  IN USB_INTERFACE        *HubIf,
+  IN UINT8                Port,
+  IN USB_PORT_RESET_MODE  ResetMode,
+  IN USB_DEVICE           *ResumeChild  OPTIONAL,
+  IN UINT8                ResumeRetryCount,
+  IN BOOLEAN              AllowYield
+  );
+
+/**
+  Arm a timer for a hub that needs to wait for its ports to be powered before
+  the hub can be used, see UsbHubInitFinish ().
+
+  @param  HubIf                 The hub interface.
+  @param  DelayUs               Power-on to power-good time in microseconds.
+
+  @retval EFI_SUCCESS           The timer is armed.
+  @retval Others                Failed to arm the timer, caller must wait.
+
+**/
+EFI_STATUS
+UsbAsyncHubPowerOnStart (
+  IN USB_INTERFACE  *HubIf,
+  IN UINTN          DelayUs
+  );
+
+/**
+  Cancel the pending asynchronous enumeration steps of a bus or of a hub.
+
+  @param  Bus                   Cancel all steps of this bus, or NULL.
+  @param  HubIf                 Cancel all steps of this hub, or NULL.
+
+  @retval TRUE                  A pending hub power-on step of HubIf was
+                                cancelled, so the hub was never fully
+                                initialized.
+  @retval FALSE                 No hub power-on step was cancelled.
+
+**/
+BOOLEAN
+UsbAsyncEnumCancel (
+  IN USB_BUS        *Bus    OPTIONAL,
+  IN USB_INTERFACE  *HubIf  OPTIONAL
+  );
+
+/**
+  Wait until all pending asynchronous enumeration steps on all USB buses
+  are finished. Only waits if the timer callbacks can run at the current TPL.
+
+**/
+VOID
+UsbBusWaitForAsyncEnum (
+  VOID
+  );

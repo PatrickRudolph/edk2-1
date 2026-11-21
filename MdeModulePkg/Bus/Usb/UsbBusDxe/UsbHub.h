@@ -169,5 +169,57 @@ UsbHubAckHubStatus (
   IN  USB_DEVICE  *UsbDev
   );
 
+/**
+  Start resetting a root hub port. The reset must be completed with
+  UsbRootHubResetPortFinish () after DelayUs microseconds.
+
+  @param  RootIf                The root hub interface.
+  @param  Port                  The port to reset.
+  @param  DelayUs               Returns the time the reset must be driven.
+
+  @retval EFI_SUCCESS           The reset is started.
+  @retval Others                Failed to start the reset.
+
+**/
+EFI_STATUS
+UsbRootHubResetPortStart (
+  IN  USB_INTERFACE  *RootIf,
+  IN  UINT8          Port,
+  OUT UINTN          *DelayUs
+  );
+
+/**
+  Complete the reset of a root hub port started by UsbRootHubResetPortStart ().
+
+  @param  RootIf                The root hub interface.
+  @param  Port                  The port to reset.
+
+  @retval EFI_SUCCESS           The hub port is reset.
+  @retval EFI_TIMEOUT           Failed to reset the port in time.
+  @retval EFI_NOT_FOUND         The low/full speed device connected to high  speed.
+                                root hub is released to the companion UHCI.
+  @retval Others                Failed to reset the port.
+
+**/
+EFI_STATUS
+UsbRootHubResetPortFinish (
+  IN USB_INTERFACE  *RootIf,
+  IN UINT8          Port
+  );
+
+/**
+  Complete the hub initialization after the hub ports are powered.
+
+  @param  HubIf                 The USB hub interface.
+
+  @retval EFI_SUCCESS           The hub is initialized.
+  @retval Others                Failed to initialize the hub.
+
+**/
+EFI_STATUS
+UsbHubInitFinish (
+  IN USB_INTERFACE  *HubIf
+  );
+
 extern USB_HUB_API  mUsbHubApi;
 extern USB_HUB_API  mUsbRootHubApi;

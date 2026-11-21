@@ -624,7 +624,7 @@ UsbGetMaxPacketSize0 (
       return EFI_SUCCESS;
     }
 
-    gBS->Stall (USB_RETRY_MAX_PACK_SIZE_STALL);
+    USB_STALL (USB_RETRY_MAX_PACK_SIZE_STALL);
   }
 
   return EFI_DEVICE_ERROR;

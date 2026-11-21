@@ -568,12 +568,12 @@ UsbHubInit (
   EFI_USB_HUB_DESCRIPTOR  *HubDesc;
   USB_ENDPOINT_DESC       *EpDesc;
   USB_INTERFACE_SETTING   *Setting;
-  EFI_USB_IO_PROTOCOL     *UsbIo;
   USB_DEVICE              *HubDev;
   EFI_STATUS              Status;
   UINT8                   Index;
   UINT8                   NumEndpoints;
   UINT16                  Depth;
+  UINTN                   PowerOnDelay;
 
   //
   // Locate the interrupt endpoint for port change map
@@ -626,6 +626,7 @@ UsbHubInit (
   HubIf->IsHub  = TRUE;
   HubIf->HubApi = &mUsbHubApi;
   HubIf->HubEp  = EpDesc;
+  PowerOnDelay  = 0;
 
   if (HubIf->Device->Speed == EFI_USB_SPEED_SUPER) {
     Depth = (UINT16)(HubIf->Device->Tier - 1);
@@ -644,14 +645,7 @@ UsbHubInit (
       UsbHubCtrlSetPortFeature (HubIf->Device, Index, (EFI_USB_PORT_FEATURE)USB_HUB_PORT_POWER);
     }
 
-    //
-    // Update for the usb hub has no power on delay requirement
-    //
-    if (HubDesc->PwrOn2PwrGood > 0) {
-      gBS->Stall (HubDesc->PwrOn2PwrGood * USB_SET_PORT_POWER_STALL);
-    }
-
-    UsbHubAckHubStatus (HubIf->Device);
+    PowerOnDelay = HubDesc->PwrOn2PwrGood * USB_SET_PORT_POWER_STALL;
   }
 
   //
@@ -674,6 +668,48 @@ UsbHubInit (
       ));
 
     return Status;
+  }
+
+  //
+  // Wait for the power to become good on the hub ports in a timer callback,
+  // so that other ports and host controllers can make progress meanwhile.
+  //
+  if (PowerOnDelay > 0) {
+    if (!EFI_ERROR (UsbAsyncHubPowerOnStart (HubIf, PowerOnDelay))) {
+      DEBUG ((DEBUG_INFO, "UsbHubInit: hub %d waits %u us for power good\n", HubDev->Address, (UINT32)PowerOnDelay));
+      return EFI_SUCCESS;
+    }
+
+    USB_STALL (PowerOnDelay);
+  }
+
+  return UsbHubInitFinish (HubIf);
+}
+
+/**
+  Complete the hub initialization after the hub ports are powered.
+
+  @param  HubIf                 The USB hub interface.
+
+  @retval EFI_SUCCESS           The hub is initialized.
+  @retval Others                Failed to initialize the hub.
+
+**/
+EFI_STATUS
+UsbHubInitFinish (
+  IN USB_INTERFACE  *HubIf
+  )
+{
+  EFI_USB_IO_PROTOCOL  *UsbIo;
+  USB_DEVICE           *HubDev;
+  USB_ENDPOINT_DESC    *EpDesc;
+  EFI_STATUS           Status;
+
+  HubDev = HubIf->Device;
+  EpDesc = HubIf->HubEp;
+
+  if (HubDev->Speed != EFI_USB_SPEED_SUPER) {
+    UsbHubAckHubStatus (HubDev);
   }
 
   //
@@ -869,7 +905,7 @@ UsbHubResetPort (
   // Drive the reset signal for worst 20ms. Check USB 2.0 Spec
   // section 7.1.7.5 for timing requirements.
   //
-  gBS->Stall (USB_SET_PORT_RESET_STALL);
+  USB_STALL (USB_SET_PORT_RESET_STALL);
 
   //
   // Check USB_PORT_STAT_C_RESET bit to see if the resetting state is done.
@@ -886,11 +922,11 @@ UsbHubResetPort (
     if (!EFI_ERROR (Status) &&
         USB_BIT_IS_SET (PortState.PortChangeStatus, USB_PORT_STAT_C_RESET))
     {
-      gBS->Stall (USB_SET_PORT_RECOVERY_STALL);
+      USB_STALL (USB_SET_PORT_RECOVERY_STALL);
       return EFI_SUCCESS;
     }
 
-    gBS->Stall (USB_WAIT_PORT_STS_CHANGE_STALL);
+    USB_STALL (USB_WAIT_PORT_STS_CHANGE_STALL);
   }
 
   return EFI_TIMEOUT;
@@ -912,19 +948,25 @@ UsbHubRelease (
   EFI_USB_IO_PROTOCOL  *UsbIo;
   EFI_STATUS           Status;
 
-  UsbIo  = &HubIf->UsbIo;
-  Status = UsbIo->UsbAsyncInterruptTransfer (
-                    UsbIo,
-                    HubIf->HubEp->Desc.EndpointAddress,
-                    FALSE,
-                    USB_HUB_POLL_INTERVAL,
-                    0,
-                    NULL,
-                    0
-                    );
+  //
+  // If the hub is still waiting for power good, the interrupt transfer
+  // has not been queued yet.
+  //
+  if (!UsbAsyncEnumCancel (NULL, HubIf)) {
+    UsbIo  = &HubIf->UsbIo;
+    Status = UsbIo->UsbAsyncInterruptTransfer (
+                      UsbIo,
+                      HubIf->HubEp->Desc.EndpointAddress,
+                      FALSE,
+                      USB_HUB_POLL_INTERVAL,
+                      0,
+                      NULL,
+                      0
+                      );
 
-  if (EFI_ERROR (Status)) {
-    return Status;
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
   }
 
   gBS->CloseEvent (HubIf->HubNotify);
@@ -1150,10 +1192,41 @@ UsbRootHubResetPort (
   IN UINT8          Port
   )
 {
-  USB_BUS              *Bus;
-  EFI_STATUS           Status;
-  EFI_USB_PORT_STATUS  PortState;
-  UINTN                Index;
+  EFI_STATUS  Status;
+  UINTN       DelayUs;
+
+  Status = UsbRootHubResetPortStart (RootIf, Port, &DelayUs);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  USB_STALL (DelayUs);
+
+  return UsbRootHubResetPortFinish (RootIf, Port);
+}
+
+/**
+  Start resetting a root hub port. The reset must be completed with
+  UsbRootHubResetPortFinish () after DelayUs microseconds.
+
+  @param  RootIf                The root hub interface.
+  @param  Port                  The port to reset.
+  @param  DelayUs               Returns the time the reset must be driven.
+
+  @retval EFI_SUCCESS           The reset is started.
+  @retval Others                Failed to start the reset.
+
+**/
+EFI_STATUS
+UsbRootHubResetPortStart (
+  IN  USB_INTERFACE  *RootIf,
+  IN  UINT8          Port,
+  OUT UINTN          *DelayUs
+  )
+{
+  USB_BUS     *Bus;
+  EFI_STATUS  Status;
+  UINTN       Index;
 
   //
   // Notice: although EHCI requires that ENABLED bit be cleared
@@ -1173,7 +1246,7 @@ UsbRootHubResetPort (
   // Drive the reset signal for at least 50ms. Check USB 2.0 Spec
   // section 7.1.7.5 for timing requirements.
   //
-  gBS->Stall (USB_SET_ROOT_PORT_RESET_STALL);
+  *DelayUs = USB_SET_ROOT_PORT_RESET_STALL;
 
   for (Index = 0; Index < Bus->MaxDevices; Index++) {
     if (  (Bus->Devices[Index] != NULL)
@@ -1188,10 +1261,39 @@ UsbRootHubResetPort (
       {
         DEBUG ((DEBUG_INFO, "Found the device matched, Index = %d, Port = %X, ParentIf = %X\n", Index, Port, RootIf));
         DEBUG ((DEBUG_INFO, "This is a USB 3 device and it need a longer waiting time for super speed.\n"));
-        gBS->Stall (USB_WAIT_PORT_STABLE_STALL);
+        *DelayUs += USB_WAIT_PORT_STABLE_STALL;
       }
     }
   }
+
+  return EFI_SUCCESS;
+}
+
+/**
+  Complete the reset of a root hub port started by UsbRootHubResetPortStart ().
+
+  @param  RootIf                The root hub interface.
+  @param  Port                  The port to reset.
+
+  @retval EFI_SUCCESS           The hub port is reset.
+  @retval EFI_TIMEOUT           Failed to reset the port in time.
+  @retval EFI_NOT_FOUND         The low/full speed device connected to high  speed.
+                                root hub is released to the companion UHCI.
+  @retval Others                Failed to reset the port.
+
+**/
+EFI_STATUS
+UsbRootHubResetPortFinish (
+  IN USB_INTERFACE  *RootIf,
+  IN UINT8          Port
+  )
+{
+  USB_BUS              *Bus;
+  EFI_STATUS           Status;
+  EFI_USB_PORT_STATUS  PortState;
+  UINTN                Index;
+
+  Bus = RootIf->Device->Bus;
 
   Status = UsbHcClearRootHubPortFeature (Bus, Port, EfiUsbPortReset);
 
@@ -1200,7 +1302,7 @@ UsbRootHubResetPort (
     return Status;
   }
 
-  gBS->Stall (USB_CLR_ROOT_PORT_RESET_STALL);
+  USB_STALL (USB_CLR_ROOT_PORT_RESET_STALL);
 
   //
   // USB host controller won't clear the RESET bit until
@@ -1219,7 +1321,7 @@ UsbRootHubResetPort (
       break;
     }
 
-    gBS->Stall (USB_WAIT_PORT_STS_CHANGE_STALL);
+    USB_STALL (USB_WAIT_PORT_STS_CHANGE_STALL);
   }
 
   if (Index == USB_WAIT_PORT_STS_CHANGE_LOOP) {
@@ -1247,7 +1349,7 @@ UsbRootHubResetPort (
         return Status;
       }
 
-      gBS->Stall (USB_SET_ROOT_PORT_ENABLE_STALL);
+      USB_STALL (USB_SET_ROOT_PORT_ENABLE_STALL);
     }
   }
 
@@ -1269,6 +1371,8 @@ UsbRootHubRelease (
   )
 {
   DEBUG ((DEBUG_INFO, "UsbRootHubRelease: root hub released for hub %p\n", HubIf));
+
+  UsbAsyncEnumCancel (NULL, HubIf);
 
   gBS->SetTimer (HubIf->HubNotify, TimerCancel, USB_ROOTHUB_POLL_INTERVAL);
   gBS->CloseEvent (HubIf->HubNotify);

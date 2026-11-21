@@ -9,6 +9,15 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 
 #include "UsbBus.h"
 
+STATIC
+EFI_STATUS
+UsbAsyncEnumConfigureLater (
+  IN USB_INTERFACE  *HubIf,
+  IN UINT8          Port,
+  IN USB_DEVICE     *Child,
+  IN UINT8          RetryCount
+  );
+
 /**
   Return the endpoint descriptor in this interface.
 
@@ -283,7 +292,9 @@ UsbConnectDriver (
 
       gBS->RestoreTPL (TPL_CALLBACK);
 
+      USB_TS ((DEBUG_INFO, "UsbConnectDriver: ConnectController %p\n", UsbIf->Handle));
       Status           = gBS->ConnectController (UsbIf->Handle, NULL, NULL, TRUE);
+      USB_TS ((DEBUG_INFO, "UsbConnectDriver: ConnectController %p done - %r\n", UsbIf->Handle, Status));
       UsbIf->IsManaged = (BOOLEAN) !EFI_ERROR (Status);
 
       DEBUG ((DEBUG_INFO, "UsbConnectDriver: TPL after connect is %d\n", (UINT32)UsbGetCurrentTpl ()));
@@ -667,6 +678,46 @@ UsbEnumerateNewDev (
   IN BOOLEAN        ResetIsNeeded
   )
 {
+  USB_STALL (USB_WAIT_PORT_STABLE_STALL);
+
+  return UsbEnumerateStableDev (HubIf, Port, ResetIsNeeded ? UsbPortResetFull : UsbPortResetSkip, NULL, 0, FALSE);
+}
+
+/**
+  Enumerate and configure the new device on the port of this HUB interface
+  after the port connection has been stable for USB_WAIT_PORT_STABLE_STALL.
+
+  The time between the end of the port reset and SET_ADDRESS is spent
+  without returning to the caller, so that no two devices on the same bus
+  are listening on the default address at the same time.
+
+  @param  HubIf                 The HUB that has the device connected.
+  @param  Port                  The port index of the hub (started with zero).
+  @param  ResetMode             How to reset the port.
+  @param  ResumeChild           The addressed device to configure, or NULL to
+                                start the enumeration.
+  @param  ResumeRetryCount      The retry count of ResumeChild.
+  @param  AllowYield            Whether the configuration of the device may be
+                                continued in a timer callback once it is
+                                addressed.
+
+  @retval EFI_SUCCESS           The device is enumerated (added or removed).
+  @retval EFI_NOT_READY         The device is addressed and will be configured
+                                in a timer callback.
+  @retval EFI_OUT_OF_RESOURCES  Failed to allocate resource for the device.
+  @retval Others                Failed to enumerate the device.
+
+**/
+EFI_STATUS
+UsbEnumerateStableDev (
+  IN USB_INTERFACE        *HubIf,
+  IN UINT8                Port,
+  IN USB_PORT_RESET_MODE  ResetMode,
+  IN USB_DEVICE           *ResumeChild  OPTIONAL,
+  IN UINT8                ResumeRetryCount,
+  IN BOOLEAN              AllowYield
+  )
+{
   USB_BUS              *Bus;
   USB_HUB_API          *HubApi;
   USB_DEVICE           *Child;
@@ -683,7 +734,14 @@ UsbEnumerateNewDev (
   HubApi  = HubIf->HubApi;
   Address = Bus->MaxDevices;
 
-  gBS->Stall (USB_WAIT_PORT_STABLE_STALL);
+  if (ResumeChild != NULL) {
+    Child      = ResumeChild;
+    RetryCount = ResumeRetryCount;
+    Address    = Child->Address;
+    goto DeviceConfigure;
+  }
+
+  USB_TS ((DEBUG_INFO, "UsbEnumerateNewDev: enter hub %p port %d\n", HubIf, Port));
 
   //
   // Hub resets the device for at least 10 milliseconds.
@@ -691,8 +749,13 @@ UsbEnumerateNewDev (
   // and the hub is a EHCI root hub, ResetPort will release
   // the device to its companion UHCI and return an error.
   //
-  if (ResetIsNeeded) {
-    Status = HubApi->ResetPort (HubIf, Port);
+  if (ResetMode != UsbPortResetSkip) {
+    if (ResetMode == UsbPortResetRootFinish) {
+      Status = UsbRootHubResetPortFinish (HubIf, Port);
+    } else {
+      Status = HubApi->ResetPort (HubIf, Port);
+    }
+
     if (EFI_ERROR (Status)) {
       DEBUG ((DEBUG_ERROR, "UsbEnumerateNewDev: failed to reset port %d - %r\n", Port, Status));
 
@@ -827,9 +890,19 @@ DeviceRetry:
     goto ON_ERROR;
   }
 
-  gBS->Stall (USB_SET_DEVICE_ADDRESS_STALL);
+  USB_STALL (USB_SET_DEVICE_ADDRESS_STALL);
 
   DEBUG ((DEBUG_INFO, "UsbEnumerateNewDev: device is now ADDRESSED at %d\n", Address));
+
+  //
+  // The device no longer listens on the default address. Let other ports
+  // make progress before the rest of the device is configured.
+  //
+  if (AllowYield && !EFI_ERROR (UsbAsyncEnumConfigureLater (HubIf, Port, Child, RetryCount))) {
+    return EFI_NOT_READY;
+  }
+
+DeviceConfigure:
 
   //
   // Host sends a Get_Descriptor request to learn the max packet
@@ -899,6 +972,7 @@ DeviceRetry:
     (EFI_IO_BUS_USB | EFI_IOB_PC_HOTPLUG),
     Bus->DevicePath
     );
+  USB_TS ((DEBUG_INFO, "UsbEnumerateNewDev: done hub %p port %d\n", HubIf, Port));
   return EFI_SUCCESS;
 
 ON_ERROR:
@@ -922,7 +996,7 @@ ON_ERROR:
 
     Status = HubApi->ResetPort (HubIf, Port);
     if (!EFI_ERROR (Status)) {
-      gBS->Stall (USB_WAIT_PORT_STABLE_STALL);
+      USB_STALL (USB_WAIT_PORT_STABLE_STALL);
       goto DeviceRetry;
     }
   }
@@ -942,6 +1016,405 @@ ON_ERROR:
   // EDKII UHCI/EHCI doesn't get impacted as it's make sense to reserve s/w resource till it gets unplugged.
   //
   return OriginalStatus;
+}
+
+//
+// All pending asynchronous enumeration steps of all USB buses.
+//
+STATIC LIST_ENTRY  mUsbAsyncEnumList = INITIALIZE_LIST_HEAD_VARIABLE (mUsbAsyncEnumList);
+
+/**
+  Find the pending asynchronous enumeration step of a hub port.
+
+  @param  HubIf                 The hub interface.
+  @param  Port                  The port of the hub.
+
+  @return The pending step, or NULL if there is none.
+
+**/
+STATIC
+USB_ASYNC_ENUM *
+UsbAsyncEnumFind (
+  IN USB_INTERFACE  *HubIf,
+  IN UINT8          Port
+  )
+{
+  LIST_ENTRY      *Entry;
+  USB_ASYNC_ENUM  *Async;
+
+  BASE_LIST_FOR_EACH (Entry, &mUsbAsyncEnumList) {
+    Async = CR (Entry, USB_ASYNC_ENUM, Link, USB_ASYNC_ENUM_SIGNATURE);
+    if ((Async->HubIf == HubIf) && (Async->Port == Port) && (Async->State != UsbAsyncHubPowerOn)) {
+      return Async;
+    }
+  }
+
+  return NULL;
+}
+
+/**
+  Remove an asynchronous enumeration step from the pending list and free it.
+  The timer is cancelled by closing its event.
+
+  @param  Async                 The step to free.
+
+**/
+STATIC
+VOID
+UsbAsyncEnumFree (
+  IN USB_ASYNC_ENUM  *Async
+  )
+{
+  EFI_TPL  OldTpl;
+
+  OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
+  RemoveEntryList (&Async->Link);
+  gBS->RestoreTPL (OldTpl);
+
+  gBS->CloseEvent (Async->Timer);
+  FreePool (Async);
+}
+
+/**
+  Kick the root hub enumeration of all USB buses except the given one. This is
+  used after an EHCI root port has been handed over to the companion controller
+  so that the device is picked up there without waiting for the next poll.
+
+  @param  Bus                   The bus that released the port.
+
+**/
+STATIC
+VOID
+UsbBusKickOtherRootHubs (
+  IN USB_BUS  *Bus
+  )
+{
+  LIST_ENTRY  *Entry;
+  USB_BUS     *Other;
+
+  BASE_LIST_FOR_EACH (Entry, &mUsbBusList) {
+    Other = BASE_CR (Entry, USB_BUS, Link);
+    if ((Other != Bus) && (Other->Devices[0] != NULL)) {
+      gBS->SignalEvent (Other->Devices[0]->Interfaces[0]->HubNotify);
+    }
+  }
+}
+
+/**
+  Timer callback that advances an asynchronous enumeration step.
+
+  @param  Event                 The timer event.
+  @param  Context               The USB_ASYNC_ENUM.
+
+**/
+STATIC
+VOID
+EFIAPI
+UsbAsyncEnumOnTimer (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+  USB_ASYNC_ENUM       *Async;
+  USB_INTERFACE        *HubIf;
+  USB_BUS              *Bus;
+  UINT8                Port;
+  USB_PORT_RESET_MODE  ResetMode;
+  USB_DEVICE           *Child;
+  UINT8                RetryCount;
+  UINTN                DelayUs;
+  EFI_STATUS           Status;
+
+  Async = (USB_ASYNC_ENUM *)Context;
+  ASSERT (Async->Signature == USB_ASYNC_ENUM_SIGNATURE);
+
+  HubIf      = Async->HubIf;
+  Bus        = Async->Bus;
+  Port       = Async->Port;
+  Child      = NULL;
+  RetryCount = 0;
+
+  switch (Async->State) {
+    case UsbAsyncHubPowerOn:
+      USB_TS ((DEBUG_INFO, "UsbAsyncEnum: hub %p power good\n", HubIf));
+      UsbAsyncEnumFree (Async);
+      UsbHubInitFinish (HubIf);
+      return;
+
+    case UsbAsyncPortDebounce:
+      USB_TS ((DEBUG_INFO, "UsbAsyncEnum: hub %p port %d stable\n", HubIf, Port));
+      if (!Async->ResetIsNeeded) {
+        ResetMode = UsbPortResetSkip;
+        break;
+      }
+
+      if (HubIf->HubApi != &mUsbRootHubApi) {
+        //
+        // A hub terminates the reset on its own and the device then listens
+        // on the default address, so the reset of a hub port cannot overlap
+        // with the enumeration of other devices on the bus.
+        //
+        ResetMode = UsbPortResetFull;
+        break;
+      }
+
+      //
+      // A root port stays in reset until software terminates it, so the
+      // reset can be driven while other ports are enumerated.
+      //
+      Status = UsbRootHubResetPortStart (HubIf, Port, &DelayUs);
+      if (!EFI_ERROR (Status)) {
+        Async->State = UsbAsyncRootPortReset;
+        Status       = gBS->SetTimer (Async->Timer, TimerRelative, EFI_TIMER_PERIOD_MICROSECONDS (DelayUs));
+        if (!EFI_ERROR (Status)) {
+          return;
+        }
+
+        USB_STALL (DelayUs);
+        ResetMode = UsbPortResetRootFinish;
+        break;
+      }
+
+      DEBUG ((DEBUG_ERROR, "UsbAsyncEnum: failed to reset port %d - %r\n", Port, Status));
+      UsbAsyncEnumFree (Async);
+      HubIf->HubApi->ClearPortChange (HubIf, Port);
+      return;
+
+    case UsbAsyncRootPortReset:
+      ResetMode = UsbPortResetRootFinish;
+      break;
+
+    case UsbAsyncDevConfigure:
+      ResetMode  = UsbPortResetSkip;
+      Child      = Async->Child;
+      RetryCount = Async->RetryCount;
+      break;
+
+    default:
+      ASSERT (FALSE);
+      return;
+  }
+
+  //
+  // Remove the step from the pending list before the device is configured,
+  // as connecting drivers to it may release the hub as well.
+  //
+  UsbAsyncEnumFree (Async);
+
+  Status = UsbEnumerateStableDev (HubIf, Port, ResetMode, Child, RetryCount, (BOOLEAN)(Child == NULL));
+  if (Status == EFI_NOT_READY) {
+    return;
+  }
+
+  HubIf->HubApi->ClearPortChange (HubIf, Port);
+
+  if ((Status == EFI_NOT_FOUND) && (HubIf->HubApi == &mUsbRootHubApi)) {
+    UsbBusKickOtherRootHubs (Bus);
+  }
+}
+
+/**
+  Allocate and arm an asynchronous enumeration step.
+
+  @param  HubIf                 The hub interface.
+  @param  Port                  The port of the hub.
+  @param  State                 The initial state.
+  @param  ResetIsNeeded         Whether the port needs to be reset.
+  @param  DelayUs               The time to wait before the step is executed.
+
+  @retval EFI_SUCCESS           The step is armed.
+  @retval Others                Failed to arm the step.
+
+**/
+STATIC
+EFI_STATUS
+UsbAsyncEnumStart (
+  IN USB_INTERFACE         *HubIf,
+  IN UINT8                 Port,
+  IN USB_ASYNC_ENUM_STATE  State,
+  IN BOOLEAN               ResetIsNeeded,
+  IN UINTN                 DelayUs
+  )
+{
+  USB_ASYNC_ENUM  *Async;
+  EFI_STATUS      Status;
+  EFI_TPL         OldTpl;
+
+  Async = AllocateZeroPool (sizeof (USB_ASYNC_ENUM));
+  if (Async == NULL) {
+    return EFI_OUT_OF_RESOURCES;
+  }
+
+  Async->Signature     = USB_ASYNC_ENUM_SIGNATURE;
+  Async->Bus           = HubIf->Device->Bus;
+  Async->HubIf         = HubIf;
+  Async->Port          = Port;
+  Async->State         = State;
+  Async->ResetIsNeeded = ResetIsNeeded;
+
+  Status = gBS->CreateEvent (
+                  EVT_TIMER | EVT_NOTIFY_SIGNAL,
+                  TPL_CALLBACK,
+                  UsbAsyncEnumOnTimer,
+                  Async,
+                  &Async->Timer
+                  );
+  if (EFI_ERROR (Status)) {
+    FreePool (Async);
+    return Status;
+  }
+
+  OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
+  InsertTailList (&mUsbAsyncEnumList, &Async->Link);
+  gBS->RestoreTPL (OldTpl);
+
+  Status = gBS->SetTimer (Async->Timer, TimerRelative, EFI_TIMER_PERIOD_MICROSECONDS (DelayUs));
+  if (EFI_ERROR (Status)) {
+    UsbAsyncEnumFree (Async);
+  }
+
+  return Status;
+}
+
+/**
+  Continue the enumeration of an addressed device in a timer callback.
+
+  @param  HubIf                 The hub interface.
+  @param  Port                  The port of the hub.
+  @param  Child                 The addressed device.
+  @param  RetryCount            The remaining enumeration retries.
+
+  @retval EFI_SUCCESS           The configuration is scheduled.
+  @retval Others                Failed to schedule, caller must continue.
+
+**/
+STATIC
+EFI_STATUS
+UsbAsyncEnumConfigureLater (
+  IN USB_INTERFACE  *HubIf,
+  IN UINT8          Port,
+  IN USB_DEVICE     *Child,
+  IN UINT8          RetryCount
+  )
+{
+  USB_ASYNC_ENUM  *Async;
+  EFI_STATUS      Status;
+
+  Status = UsbAsyncEnumStart (HubIf, Port, UsbAsyncDevConfigure, FALSE, 0);
+  if (EFI_ERROR (Status)) {
+    return Status;
+  }
+
+  //
+  // The step was just added to the tail of the list.
+  //
+  Async             = CR (GetPreviousNode (&mUsbAsyncEnumList, &mUsbAsyncEnumList), USB_ASYNC_ENUM, Link, USB_ASYNC_ENUM_SIGNATURE);
+  Async->Child      = Child;
+  Async->RetryCount = RetryCount;
+
+  //
+  // Queue the callback behind the already expired timers.
+  //
+  gBS->SetTimer (Async->Timer, TimerCancel, 0);
+  return gBS->SignalEvent (Async->Timer);
+}
+
+/**
+  Arm a timer for a hub that needs to wait for its ports to be powered before
+  the hub can be used, see UsbHubInitFinish ().
+
+  @param  HubIf                 The hub interface.
+  @param  DelayUs               Power-on to power-good time in microseconds.
+
+  @retval EFI_SUCCESS           The timer is armed.
+  @retval Others                Failed to arm the timer, caller must wait.
+
+**/
+EFI_STATUS
+UsbAsyncHubPowerOnStart (
+  IN USB_INTERFACE  *HubIf,
+  IN UINTN          DelayUs
+  )
+{
+  return UsbAsyncEnumStart (HubIf, 0, UsbAsyncHubPowerOn, FALSE, DelayUs);
+}
+
+/**
+  Cancel the pending asynchronous enumeration steps of a bus or of a hub.
+
+  @param  Bus                   Cancel all steps of this bus, or NULL.
+  @param  HubIf                 Cancel all steps of this hub, or NULL.
+
+  @retval TRUE                  A pending hub power-on step of HubIf was
+                                cancelled, so the hub was never fully
+                                initialized.
+  @retval FALSE                 No hub power-on step was cancelled.
+
+**/
+BOOLEAN
+UsbAsyncEnumCancel (
+  IN USB_BUS        *Bus    OPTIONAL,
+  IN USB_INTERFACE  *HubIf  OPTIONAL
+  )
+{
+  LIST_ENTRY      *Entry;
+  LIST_ENTRY      *Next;
+  USB_ASYNC_ENUM  *Async;
+  BOOLEAN         PowerOnCancelled;
+  EFI_TPL         OldTpl;
+
+  PowerOnCancelled = FALSE;
+
+  OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
+  BASE_LIST_FOR_EACH_SAFE (Entry, Next, &mUsbAsyncEnumList) {
+    Async = CR (Entry, USB_ASYNC_ENUM, Link, USB_ASYNC_ENUM_SIGNATURE);
+    if (((Bus != NULL) && (Async->Bus == Bus)) || ((HubIf != NULL) && (Async->HubIf == HubIf))) {
+      DEBUG ((DEBUG_INFO, "UsbAsyncEnumCancel: cancel hub %p port %d state %d\n", Async->HubIf, Async->Port, Async->State));
+      if ((Async->State == UsbAsyncHubPowerOn) && (Async->HubIf == HubIf)) {
+        PowerOnCancelled = TRUE;
+      }
+
+      UsbAsyncEnumFree (Async);
+    }
+  }
+
+  gBS->RestoreTPL (OldTpl);
+
+  return PowerOnCancelled;
+}
+
+/**
+  Wait until all pending asynchronous enumeration steps on all USB buses
+  are finished. Only waits if the timer callbacks can run at the current TPL.
+
+**/
+VOID
+UsbBusWaitForAsyncEnum (
+  VOID
+  )
+{
+  UINTN  Index;
+
+  if (IsListEmpty (&mUsbAsyncEnumList)) {
+    return;
+  }
+
+  if (UsbGetCurrentTpl () >= TPL_CALLBACK) {
+    DEBUG ((DEBUG_INFO, "UsbBusWaitForAsyncEnum: cannot wait at TPL %d\n", (UINT32)UsbGetCurrentTpl ()));
+    return;
+  }
+
+  USB_TS ((DEBUG_INFO, "UsbBusWaitForAsyncEnum: waiting for pending enumeration\n"));
+
+  for (Index = 0; Index < USB_ASYNC_ENUM_WAIT_LOOP; Index++) {
+    if (IsListEmpty (&mUsbAsyncEnumList)) {
+      break;
+    }
+
+    gBS->Stall (USB_ASYNC_ENUM_WAIT_STALL);
+  }
+
+  USB_TS ((DEBUG_INFO, "UsbBusWaitForAsyncEnum: done%a\n", IsListEmpty (&mUsbAsyncEnumList) ? "" : " (timeout)"));
 }
 
 /**
@@ -965,9 +1438,18 @@ UsbEnumeratePort (
   USB_DEVICE           *Child;
   EFI_USB_PORT_STATUS  PortState;
   EFI_STATUS           Status;
+  BOOLEAN              ResetIsNeeded;
 
   Child  = NULL;
   HubApi = HubIf->HubApi;
+
+  //
+  // The port is being enumerated asynchronously, its change bits are
+  // cleared once that is done.
+  //
+  if (UsbAsyncEnumFind (HubIf, Port) != NULL) {
+    return EFI_SUCCESS;
+  }
 
   // Zero out PortState in case GetPortStatus does not set
   // it and we continue on the EFI_DEVICE_ERROR path
@@ -1061,13 +1543,19 @@ UsbEnumeratePort (
     // Now, new device connected, enumerate and configure the device
     //
     DEBUG ((DEBUG_INFO, "UsbEnumeratePort: new device connected at port %d\n", Port));
-    if (USB_BIT_IS_SET (PortState.PortChangeStatus, USB_PORT_STAT_C_RESET) &&
-        (Status != EFI_DEVICE_ERROR))
-    {
-      Status = UsbEnumerateNewDev (HubIf, Port, FALSE);
-    } else {
-      Status = UsbEnumerateNewDev (HubIf, Port, TRUE);
+    ResetIsNeeded = (BOOLEAN) !(USB_BIT_IS_SET (PortState.PortChangeStatus, USB_PORT_STAT_C_RESET) &&
+                                (Status != EFI_DEVICE_ERROR));
+
+    //
+    // Wait for the connection to become stable in a timer callback, so that
+    // all ports of all hubs and host controllers can wait in parallel.
+    //
+    Status = UsbAsyncEnumStart (HubIf, Port, UsbAsyncPortDebounce, ResetIsNeeded, USB_WAIT_PORT_STABLE_STALL);
+    if (!EFI_ERROR (Status)) {
+      return EFI_SUCCESS;
     }
+
+    Status = UsbEnumerateNewDev (HubIf, Port, ResetIsNeeded);
   } else {
     DEBUG ((DEBUG_INFO, "UsbEnumeratePort: device disconnected event on port %d\n", Port));
   }

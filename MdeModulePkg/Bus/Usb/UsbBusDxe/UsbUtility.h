@@ -271,3 +271,46 @@ EFI_TPL
 UsbGetCurrentTpl (
   VOID
   );
+
+/**
+  Return a monotonic timestamp in microseconds, used for boot time profiling
+  of the USB bus enumeration. Handles wrap-around of narrow counters as long
+  as it is called at least once per counter period.
+
+  @return Microseconds since an arbitrary point in time.
+
+**/
+UINT64
+UsbGetTimeUs (
+  VOID
+  );
+
+/**
+  Stall wrapper that logs the caller and accumulates total stall time.
+
+  @param  Microseconds     Time to stall.
+  @param  Caller           Name of the calling function.
+  @param  Line             Line number of the caller.
+
+**/
+VOID
+UsbBusStall (
+  IN UINTN        Microseconds,
+  IN CONST CHAR8  *Caller,
+  IN UINTN        Line
+  );
+
+#define USB_STALL(Us)  UsbBusStall ((Us), __func__, __LINE__)
+
+//
+// Print a debug message prefixed with a timestamp in milliseconds.
+//
+#define USB_TS(Expression)                                                      \
+  do {                                                                          \
+    DEBUG_CODE_BEGIN ();                                                        \
+    UINT64  UsbTsNow__ = UsbGetTimeUs ();                                       \
+    DEBUG ((DEBUG_INFO, "[UsbBus %Lu.%03Lu ms] ", DivU64x32 (UsbTsNow__, 1000), \
+            (UINT64)ModU64x32 (UsbTsNow__, 1000)));                             \
+    DEBUG (Expression);                                                         \
+    DEBUG_CODE_END ();                                                          \
+  } while (FALSE)

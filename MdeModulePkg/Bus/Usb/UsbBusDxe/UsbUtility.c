@@ -1111,3 +1111,50 @@ UsbBusRecursivelyConnectWantedUsbIo (
 
   return EFI_SUCCESS;
 }
+
+UINT64
+UsbGetTimeUs (
+  VOID
+  )
+{
+  STATIC UINT64  Start = 0;
+  STATIC UINT64  End   = 0;
+  STATIC UINT64  Last  = 0;
+  STATIC UINT64  Accumulated = 0;
+  UINT64         Now;
+  UINT64         Delta;
+
+  if ((Start == 0) && (End == 0)) {
+    GetPerformanceCounterProperties (&Start, &End);
+    Last = GetPerformanceCounter ();
+  }
+
+  Now = GetPerformanceCounter ();
+  if (End >= Start) {
+    Delta = (Now >= Last) ? (Now - Last) : ((End - Last) + (Now - Start) + 1);
+  } else {
+    Delta = (Now <= Last) ? (Last - Now) : ((Last - End) + (Start - Now) + 1);
+  }
+
+  Last         = Now;
+  Accumulated += Delta;
+
+  return DivU64x32 (GetTimeInNanoSecond (Accumulated), 1000);
+}
+
+VOID
+UsbBusStall (
+  IN UINTN        Microseconds,
+  IN CONST CHAR8  *Caller,
+  IN UINTN        Line
+  )
+{
+  STATIC UINT64  Total = 0;
+
+  Total += Microseconds;
+  if (Microseconds >= 1000) {
+    USB_TS ((DEBUG_INFO, "Stall %u us in %a:%u (total %Lu us)\n", (UINT32)Microseconds, Caller, (UINT32)Line, Total));
+  }
+
+  gBS->Stall (Microseconds);
+}

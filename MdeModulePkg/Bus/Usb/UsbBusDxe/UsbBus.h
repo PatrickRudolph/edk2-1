@@ -24,6 +24,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <Library/DevicePathLib.h>
 #include <Library/MemoryAllocationLib.h>
 #include <Library/ReportStatusCodeLib.h>
+#include <Library/TimerLib.h>
 
 #include <IndustryStandard/Usb.h>
 
@@ -54,6 +55,13 @@ typedef struct _USB_HUB_API    USB_HUB_API;
 //
 #define USB_ROOTHUB_POLL_INTERVAL  (100 * 10000U)
 #define USB_HUB_POLL_INTERVAL      64
+
+//
+// Wait for pending asynchronous enumeration for at most 10 seconds
+// (LOOP * STALL = 100000 * 0.1ms).
+//
+#define USB_ASYNC_ENUM_WAIT_STALL  100
+#define USB_ASYNC_ENUM_WAIT_LOOP   100000
 
 //
 // Wait for port stable to work, refers to specification
@@ -275,7 +283,51 @@ struct _USB_BUS {
   // DEVICE_PATH_LIST_ITEM
   //
   LIST_ENTRY    WantedUsbIoDPList;
+
+  //
+  // Link in mUsbBusList
+  //
+  LIST_ENTRY    Link;
 };
+
+//
+// A pending asynchronous enumeration step. Hardware wait times (port debounce,
+// root port reset, hub power-on) are implemented with timer events instead of
+// gBS->Stall () so that ports on all hubs and host controllers can wait in
+// parallel. Every armed timer is tracked in a global list that parents can
+// wait on, see UsbBusWaitForAsyncEnum ().
+//
+#define USB_ASYNC_ENUM_SIGNATURE  SIGNATURE_32 ('U', 'S', 'B', 'A')
+
+typedef enum {
+  UsbAsyncPortDebounce,
+  UsbAsyncRootPortReset,
+  UsbAsyncDevConfigure,
+  UsbAsyncHubPowerOn
+} USB_ASYNC_ENUM_STATE;
+
+typedef struct {
+  UINTN                   Signature;
+  LIST_ENTRY              Link;
+  USB_BUS                 *Bus;
+  USB_INTERFACE           *HubIf;
+  UINT8                   Port;
+  BOOLEAN                 ResetIsNeeded;
+  USB_ASYNC_ENUM_STATE    State;
+  EFI_EVENT               Timer;
+
+  //
+  // Addressed device to configure in state UsbAsyncDevConfigure
+  //
+  USB_DEVICE              *Child;
+  UINT8                   RetryCount;
+} USB_ASYNC_ENUM;
+
+//
+// Global list of all started USB buses, used to kick the companion
+// controllers after an EHCI root port is handed over to them.
+//
+extern LIST_ENTRY  mUsbBusList;
 
 //
 // USB Hub Api

@@ -26,6 +26,8 @@ EFI_USB_IO_PROTOCOL  mUsbIoProtocol = {
   UsbIoPortReset
 };
 
+LIST_ENTRY  mUsbBusList = INITIALIZE_LIST_HEAD_VARIABLE (mUsbBusList);
+
 EFI_DRIVER_BINDING_PROTOCOL  mUsbBusDriverBinding = {
   UsbBusControllerDriverSupported,
   UsbBusControllerDriverStart,
@@ -862,7 +864,7 @@ UsbIoPortReset (
   Status       = UsbSetAddress (Dev, DevAddress);
   Dev->Address = DevAddress;
 
-  gBS->Stall (USB_SET_DEVICE_ADDRESS_STALL);
+  USB_STALL (USB_SET_DEVICE_ADDRESS_STALL);
 
   if (EFI_ERROR (Status)) {
     //
@@ -1063,6 +1065,12 @@ UsbBusBuildProtocol (
   RootIf->DevicePath      = UsbBus->DevicePath;
 
   //
+  // The root hub enumeration may already run during its initialization.
+  //
+  UsbBus->Devices[0] = RootHub;
+  InsertTailList (&mUsbBusList, &UsbBus->Link);
+
+  //
   // Report Status Code here since we will enumerate the USB devices
   //
   REPORT_STATUS_CODE_WITH_DEVICE_PATH (
@@ -1075,10 +1083,11 @@ UsbBusBuildProtocol (
 
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "UsbBusStart: Failed to init root hub - %r\n", Status));
+    UsbAsyncEnumCancel (UsbBus, NULL);
+    RemoveEntryList (&UsbBus->Link);
+    UsbBus->Devices[0] = NULL;
     goto FREE_ROOTHUB;
   }
-
-  UsbBus->Devices[0] = RootHub;
 
   DEBUG ((DEBUG_INFO, "UsbBusStart: usb bus started on %p, root hub %p\n", Controller, RootIf));
   return EFI_SUCCESS;
@@ -1317,7 +1326,9 @@ UsbBusControllerDriverStart (
     // If first start, build the bus execute environment and install bus protocol
     //
     REPORT_STATUS_CODE (EFI_PROGRESS_CODE, (EFI_IO_BUS_USB | EFI_P_PC_ENABLE));
+    USB_TS ((DEBUG_INFO, "UsbBusControllerDriverStart: build bus for %p\n", Controller));
     Status = UsbBusBuildProtocol (This, Controller, RemainingDevicePath);
+    USB_TS ((DEBUG_INFO, "UsbBusControllerDriverStart: build bus for %p done - %r\n", Controller, Status));
     if (EFI_ERROR (Status)) {
       return Status;
     }
@@ -1353,6 +1364,12 @@ UsbBusControllerDriverStart (
         return EFI_SUCCESS;
       }
     }
+
+    //
+    // The devices are enumerated asynchronously. Wait for all host
+    // controllers to finish, before the wanted devices are connected.
+    //
+    UsbBusWaitForAsyncEnum ();
 
     Status = UsbBusAddWantedUsbIoDP (UsbBusId, RemainingDevicePath);
     ASSERT (!EFI_ERROR (Status));
@@ -1466,6 +1483,8 @@ UsbBusControllerDriverStop (
   //
   OldTpl = gBS->RaiseTPL (TPL_CALLBACK);
 
+  UsbAsyncEnumCancel (Bus, NULL);
+
   RootHub = Bus->Devices[0];
   RootIf  = RootHub->Interfaces[0];
 
@@ -1484,6 +1503,7 @@ UsbBusControllerDriverStop (
 
   if (!EFI_ERROR (ReturnStatus)) {
     mUsbRootHubApi.Release (RootIf);
+    RemoveEntryList (&Bus->Link);
     gBS->FreePool (RootIf);
     gBS->FreePool (RootHub);
 
